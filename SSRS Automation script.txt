@@ -1,0 +1,124 @@
+<#
+# If you are configuring for 2019-22 SSRS Version - Change the V15 and replace it with v16
+# Add Your Server name
+# Your server and instance
+# Your sa Password
+#>
+function Get-ConfigSet() {
+    return Get-WmiObject –namespace "root\Microsoft\SqlServer\ReportServer\RS_SSRS\v15\Admin" `
+        -class MSReportServer_ConfigurationSetting -ComputerName "Your_Server_Name" #Add Your Server name
+}
+
+# Allow importing of sqlps module
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Force
+
+# Retrieve the current configuration
+$configset = Get-ConfigSet
+
+$configset
+
+If (! $configset.IsInitialized) {
+    # Get the ReportServer and ReportServerTempDB creation script
+    [string]$dbscript = $configset.GenerateDatabaseCreationScript("ReportServer", 1033, $false).Script
+
+    # Output the creation script for debugging
+    Write-Host "Database Creation Script:"
+    Write-Host $dbscript
+
+    # Split the script into individual commands, removing 'GO' statements
+    $commands = $dbscript -split '\bGO\b'
+
+    # Import the SQL Server PowerShell module
+    Import-Module sqlps -DisableNameChecking | Out-Null
+
+    # Establish a connection to the database server using sa credentials
+    $serverName = "Your_Server_Name\Instance_Name" # Your server and instance
+    $saUser = "sa" 
+    $saPassword = "Your_sa_Password" # Your sa Password
+
+    # Create the connection
+    $connectionString = "Server=$serverName;Database=master;User ID=$saUser;Password=$saPassword;"
+    $conn = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+
+    try {
+        $conn.Open()
+        Write-Host "Successfully connected to SQL Server as 'sa'."
+
+        # Create a command object to execute each command
+        $cmd = $conn.CreateCommand()
+
+        # Execute each command individually
+        foreach ($command in $commands) {
+            $command = $command.Trim()
+            if (-not [string]::IsNullOrEmpty($command)) {
+                try {
+                    $cmd.CommandText = $command
+                    $cmd.ExecuteNonQuery()
+                } catch {
+                    Write-Host "Failed to execute command."
+                    Write-Host "Command: $command"
+                    Write-Host "Error Message: $_.Exception.Message"
+                }
+            }
+        }
+
+        Write-Host "Database 'ReportServer' created successfully."
+
+        # Now, retrieve the database object
+        $smoConnection = New-Object Microsoft.SqlServer.Management.Common.ServerConnection($conn)
+        $smo = New-Object Microsoft.SqlServer.Management.Smo.Server -ArgumentList $smoConnection
+        $db = $smo.Databases["ReportServer"]
+
+        # Set permissions for the databases
+        if ($db -ne $null) {
+            $dbscript = $configset.GenerateDatabaseRightsScript($configset.WindowsServiceIdentityConfigured, "ReportServer", $false, $true).Script
+            
+            # Execute the permission script on the database
+            $db.ExecuteNonQuery($dbscript)
+        } else {
+            Write-Host "Failed to retrieve the 'ReportServer' database object."
+        }
+
+        # Set the database connection info using sa credentials
+        $configset.SetDatabaseConnection("$serverName", "ReportServer", 2, $saUser, $saPassword)
+
+        $configset.SetVirtualDirectory("ReportServerWebService", "ReportServer", 1033)
+        $configset.ReserveURL("ReportServerWebService", "http://+:80", 1033)
+
+        # For SSRS 2020 (v16)
+        $configset.SetVirtualDirectory("ReportServerWebService", "ReportServer", 1033)
+        $configset.ReserveURL("ReportServerWebService", "http://+:80", 1033)
+
+        $configset.SetVirtualDirectory("ReportServerWebApp", "Reports", 1033)
+        $configset.ReserveURL("ReportServerWebApp", "http://+:80", 1033)
+
+        # Initialize Report Server
+        $configset.InitializeReportServer($configset.InstallationID)
+
+        # Re-start services?
+        $configset.SetServiceState($false, $false, $false)
+        Restart-Service $configset.ServiceName
+        $configset.SetServiceState($true, $true, $true)
+
+        # Update the current configuration
+        $configset = Get-ConfigSet
+
+        # Output to screen
+        $configset.IsReportManagerEnabled
+        $configset.IsInitialized
+        $configset.IsWebServiceEnabled
+        $configset.IsWindowsServiceEnabled
+        $configset.ListReportServersInDatabase()
+        $configset.ListReservedUrls()
+
+        $inst = Get-WmiObject –namespace "root\Microsoft\SqlServer\ReportServer\RS_SSRS\v15" `
+            -class MSReportServer_Instance -ComputerName "Your_Server_Name"
+
+        $inst.GetReportServerUrls()
+    } catch {
+        Write-Host "Failed to execute command."
+        Write-Host "Error Message: $_.Exception.Message"
+    } finally {
+        $conn.Close() # Ensure the connection is closed
+    }
+}
